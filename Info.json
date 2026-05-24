@@ -1,13 +1,16 @@
 {
   "name": "DV Timecode",
-  "identifier": "me.xingrz.iina-dv-timecode",
-  "version": "0.1.0",
+  "identifier": "me.xingrz.dvtimecode",
+  "version": "1.0.0",
   "author": {
     "name": "XiNGRZ",
-    "email": "hi@xingrz.me"
+    "email": "hi@xingrz.me",
+    "url": "https://github.com/xingrz"
   },
-  "description": "Overlay the recording timestamp from DV/HDV tape captures (.dv, .avi, .mov, .m2t, .ts).",
+  "description": "Overlay the recording timestamp from DV/HDV tape captures (.dv, .avi, .mov, .m2t, .ts, .mpg, .mpeg, .m2ts, .mts).",
   "entry": "dist/index.js",
+  "ghRepo": "xingrz/iina-dv-timecode",
+  "ghVersion": 1,
   "permissions": [
     "video-overlay",
     "file-system"

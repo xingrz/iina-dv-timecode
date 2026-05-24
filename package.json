@@ -1,15 +1,20 @@
 {
   "name": "iina-dv-timecode",
-  "version": "0.1.0",
-  "description": "IINA plugin that overlays the recording timestamp from raw DV (.dv) tape captures.",
+  "version": "1.0.0",
+  "description": "IINA plugin that overlays the recording timestamp from DV/HDV tape captures (.dv, .avi, .mov, .m2t, .ts, .mpg, .mpeg, .m2ts, .mts).",
   "main": "dist/index.js",
   "author": "XiNGRZ <hi@xingrz.me>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xingrz/iina-dv-timecode.git"
+  },
   "scripts": {
     "build": "tsdown",
     "watch": "tsdown --watch",
     "check": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepare": "git config --local core.hooksPath .githooks || true"
   },
   "devDependencies": {
     "@tsconfig/strictest": "^2.0.8",

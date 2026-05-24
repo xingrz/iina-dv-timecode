@@ -1,0 +1,11 @@
+#!/bin/sh
+# Re-bundle dist/ from src/ so the committed dist/ always matches the
+# source being committed. Skip when nothing under src/ is staged — no
+# point re-running the bundler if only docs or config changed.
+set -e
+
+if git diff --cached --name-only | grep -qE '^src/'; then
+  echo "pre-commit: rebuilding dist/ via tsdown..."
+  npm run --silent build
+  git add dist/
+fi
