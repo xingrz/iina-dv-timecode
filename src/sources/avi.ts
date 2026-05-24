@@ -1,6 +1,6 @@
-import { detectFormat, DvFormat } from '../dv';
+import { detectFormat, DvFormat, extractTimestamp } from '../dv';
 import { fileSize, read4cc, readU16LE, readU32LE, readU64LE } from '../io';
-import { DvSource } from './types';
+import { Source } from './types';
 
 /**
  * DV inside RIFF AVI. Handles:
@@ -24,7 +24,7 @@ interface Segment {
   offsets: number[]; // absolute data offset (= chunk header pos + 8) of each video chunk
 }
 
-export function openAvi(handle: IINA.API.FileHandle): DvSource | null {
+export function openAvi(handle: IINA.API.FileHandle): Source | null {
   const fileLen = fileSize(handle);
   if (fileLen < 12) {
     handle.close();
@@ -86,17 +86,16 @@ export function openAvi(handle: IINA.API.FileHandle): DvSource | null {
   const total = cum[cum.length - 1]!;
 
   return {
-    format,
-    frameCount: total,
-    readFrame(frameIdx) {
-      if (frameIdx < 0 || frameIdx >= total) return null;
+    timestampAt(positionSec) {
+      const frameIdx = Math.max(0, Math.floor(positionSec * format.fps));
+      if (frameIdx >= total) return null;
       let segIdx = 0;
       while (segIdx + 1 < cum.length && cum[segIdx + 1]! <= frameIdx) segIdx++;
       const seg = segments[segIdx]!;
       const local = frameIdx - cum[segIdx]!;
       handle.seekTo(seg.offsets[local]!);
       const buf = handle.read(format.frameSize);
-      return buf && buf.length > 0 ? buf : null;
+      return buf && buf.length > 0 ? extractTimestamp(buf) : null;
     },
     close() {
       try { handle.close(); } catch { /* ignore */ }

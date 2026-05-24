@@ -1,19 +1,20 @@
-import { openRaw } from './raw';
 import { openAvi } from './avi';
+import { openM2t } from './m2t';
 import { openMov } from './mov';
-import { DvSource } from './types';
+import { openRaw } from './raw';
+import { Source } from './types';
 
-export type { DvSource } from './types';
+export type { Source } from './types';
 
 /**
- * Open a file as a DV stream source. The handle is consumed: on success the
- * returned source owns it; on failure (unsupported container, not DV inside)
- * the handle is closed and null is returned.
+ * Open a file as a recording-timestamp source. The handle is consumed: on
+ * success the returned source owns it; on failure (unsupported container,
+ * not DV/HDV inside) the handle is closed and null is returned.
  */
-export function openDvSource(
+export function openSource(
   handle: IINA.API.FileHandle,
   ext: string,
-): DvSource | null {
+): Source | null {
   switch (ext) {
     case 'dv':
       return openRaw(handle);
@@ -22,6 +23,9 @@ export function openDvSource(
     case 'mov':
     case 'qt':
       return openMov(handle);
+    case 'm2t':
+    case 'ts':
+      return openM2t(handle);
     default:
       try { handle.close(); } catch { /* ignore */ }
       return null;
@@ -29,5 +33,12 @@ export function openDvSource(
 }
 
 export function isSupportedExt(ext: string): boolean {
-  return ext === 'dv' || ext === 'avi' || ext === 'mov' || ext === 'qt';
+  return (
+    ext === 'dv' ||
+    ext === 'avi' ||
+    ext === 'mov' ||
+    ext === 'qt' ||
+    ext === 'm2t' ||
+    ext === 'ts'
+  );
 }

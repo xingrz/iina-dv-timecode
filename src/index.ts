@@ -1,12 +1,11 @@
-import { extractTimestamp, DvTimestamp } from './dv';
-import { DvSource, isSupportedExt, openDvSource } from './sources';
+import { DvTimestamp } from './dv';
+import { Source, isSupportedExt, openSource } from './sources';
 
 const { core, event, file, overlay, console: log } = iina;
 
-let opened: DvSource | null = null;
+let opened: Source | null = null;
 let updateTimer: string | null = null;
 let overlayInitialized = false;
-let lastFrameRead = -1;
 let lastText = '';
 
 const STYLE = `
@@ -45,7 +44,9 @@ function pad2(n: number): string {
 }
 
 function formatTimestamp(ts: DvTimestamp): string {
-  return `${ts.year}-${pad2(ts.month)}-${pad2(ts.day)} ${pad2(ts.hour)}:${pad2(ts.minute)}:${pad2(ts.second)}`;
+  const date = `${ts.year}-${pad2(ts.month)}-${pad2(ts.day)}`;
+  if (ts.hour === undefined) return date;
+  return `${date} ${pad2(ts.hour)}:${pad2(ts.minute ?? 0)}:${pad2(ts.second ?? 0)}`;
 }
 
 function ensureOverlayReady(): boolean {
@@ -76,7 +77,6 @@ function closeCurrent() {
     opened.close();
     opened = null;
   }
-  lastFrameRead = -1;
   showText('');
 }
 
@@ -84,13 +84,8 @@ function tick() {
   if (!opened) return;
   const position = core.status.position;
   if (position === null) return;
-  const frameIdx = Math.max(0, Math.floor(position * opened.format.fps));
-  if (frameIdx === lastFrameRead) return;
-  lastFrameRead = frameIdx;
-
-  const frame = opened.readFrame(frameIdx);
-  if (!frame) return;
-  const ts = extractTimestamp(frame);
+  const duration = core.status.duration;
+  const ts = opened.timestampAt(position, duration ?? undefined);
   showText(ts ? formatTimestamp(ts) : '');
 }
 
@@ -111,14 +106,11 @@ function openFile(url: string) {
     return;
   }
 
-  const source = openDvSource(handle, ext);
+  const source = openSource(handle, ext);
   if (!source) {
-    log.log(`DV Timecode: .${ext} file does not contain DV`);
+    log.log(`DV Timecode: .${ext} file does not contain DV/HDV`);
     return;
   }
-  log.log(
-    `DV Timecode: ${source.format.system.toUpperCase()}, ${source.format.fps.toFixed(3)} fps, ${source.frameCount} frames`,
-  );
 
   opened = source;
   // Poll on a timer; mpv.time-pos.changed fires too often.

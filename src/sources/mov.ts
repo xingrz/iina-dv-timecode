@@ -1,6 +1,6 @@
-import { detectFormat, DvFormat } from '../dv';
+import { detectFormat, DvFormat, extractTimestamp } from '../dv';
 import { fileSize, read4cc, readU32BE, readU64BE } from '../io';
-import { DvSource } from './types';
+import { Source } from './types';
 
 // QuickTime sample description (codec) FourCCs for DV variants.
 const DV_CODECS = new Set(['dvc ', 'dvcp', 'dvpp', 'dv5n', 'dv5p']);
@@ -15,7 +15,7 @@ interface Atom {
  * DV inside QuickTime (.mov / .qt). Walks atoms to find the video trak with
  * a DV codec, then builds a sample-offset table from stco/co64 + stsc + stsz.
  */
-export function openMov(handle: IINA.API.FileHandle): DvSource | null {
+export function openMov(handle: IINA.API.FileHandle): Source | null {
   const fileLen = fileSize(handle);
   const moov = findAtom(handle, 0, fileLen, 'moov');
   if (!moov) {
@@ -56,13 +56,12 @@ export function openMov(handle: IINA.API.FileHandle): DvSource | null {
   }
 
   return {
-    format,
-    frameCount: offsets.length,
-    readFrame(frameIdx) {
-      if (frameIdx < 0 || frameIdx >= offsets.length) return null;
+    timestampAt(positionSec) {
+      const frameIdx = Math.max(0, Math.floor(positionSec * format.fps));
+      if (frameIdx >= offsets.length) return null;
       handle.seekTo(offsets[frameIdx]!);
       const buf = handle.read(format.frameSize);
-      return buf && buf.length > 0 ? buf : null;
+      return buf && buf.length > 0 ? extractTimestamp(buf) : null;
     },
     close() {
       try { handle.close(); } catch { /* ignore */ }

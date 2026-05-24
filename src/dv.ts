@@ -20,9 +20,12 @@ export interface DvTimestamp {
   year: number;
   month: number;
   day: number;
-  hour: number;
-  minute: number;
-  second: number;
+  // Optional because some sources (notably HDV) only expose a reliable
+  // recording date — the 0x63 pack they carry is SMPTE timecode rather than
+  // wall-clock, and showing it as time would be misleading.
+  hour?: number;
+  minute?: number;
+  second?: number;
 }
 
 // VAUX pack headers we care about. The audio side (0x52/0x53) carries the same
@@ -112,6 +115,32 @@ export function extractTimestamp(data: Uint8Array): DvTimestamp | null {
         if (date && time) return { ...date, ...time };
       }
     }
+  }
+  return date && time ? { ...date, ...time } : null;
+}
+
+/**
+ * Scan a raw byte run (typically an MPEG-2 user_data section from an HDV
+ * stream) for the same 5-byte rec-date / rec-time packs DV uses. Unlike
+ * `extractTimestamp` this does not require a DV header at the start — the
+ * caller has already located the user_data region, and we just iterate
+ * every byte position looking for 0x62 / 0x63 followed by BCD that parses
+ * to a valid date and time. Random-byte false positives are unlikely
+ * because parseRecDate / parseRecTime reject invalid ranges.
+ */
+export function extractHdvTimestamp(userData: Uint8Array): DvTimestamp | null {
+  let date: { year: number; month: number; day: number } | null = null;
+  let time: { hour: number; minute: number; second: number } | null = null;
+  for (let i = 0; i + 5 <= userData.length; i++) {
+    const h = userData[i]!;
+    if (!date && h === PACK_VAUX_REC_DATE) {
+      const d = parseRecDate(userData.subarray(i, i + 5));
+      if (d) date = d;
+    } else if (!time && h === PACK_VAUX_REC_TIME) {
+      const t = parseRecTime(userData.subarray(i, i + 5));
+      if (t) time = t;
+    }
+    if (date && time) break;
   }
   return date && time ? { ...date, ...time } : null;
 }

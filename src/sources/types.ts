@@ -1,13 +1,19 @@
-import { DvFormat } from '../dv';
+import { DvTimestamp } from '../dv';
 
-export interface DvSource {
-  readonly format: DvFormat;
-  readonly frameCount: number;
+export interface Source {
   /**
-   * Read the full bytes of the given DV frame (typically `format.frameSize`,
-   * less if EOF). Returns null if the frame is out of range or the read came
-   * up short. Callers scan the result for VAUX packs.
+   * Best-effort recording timestamp at the given playback position.
+   *
+   * For DV containers (raw/avi/mov) the position is converted to a frame
+   * index using the source's internal fps and the frame's VAUX rec-date /
+   * rec-time packs are decoded. For HDV (m2t) the source estimates a file
+   * offset from `durationSec`, walks nearby TS packets to find a GOP
+   * user_data section, and decodes its embedded packs.
+   *
+   * @param positionSec Current playback position in seconds.
+   * @param durationSec Total stream duration in seconds; only used by HDV.
+   * @returns The recording timestamp, or null if it could not be extracted.
    */
-  readFrame(frameIdx: number): Uint8Array | null;
+  timestampAt(positionSec: number, durationSec?: number): DvTimestamp | null;
   close(): void;
 }
