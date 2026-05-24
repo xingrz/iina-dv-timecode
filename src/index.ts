@@ -1,21 +1,9 @@
-import {
-  detectFormat,
-  extractTimestampFromSequence,
-  DIF_SEQUENCE_SIZE,
-  DvFormat,
-  DvTimestamp,
-} from './dv';
+import { extractTimestamp, DvTimestamp } from './dv';
+import { DvSource, isSupportedExt, openDvSource } from './sources';
 
 const { core, event, file, overlay, console: log } = iina;
 
-log.log('DV Timecode: entry loaded');
-
-interface OpenedFile {
-  handle: IINA.API.FileHandle;
-  format: DvFormat;
-}
-
-let opened: OpenedFile | null = null;
+let opened: DvSource | null = null;
 let updateTimer: string | null = null;
 let overlayInitialized = false;
 let lastFrameRead = -1;
@@ -85,7 +73,7 @@ function closeCurrent() {
     updateTimer = null;
   }
   if (opened) {
-    try { opened.handle.close(); } catch { /* ignore */ }
+    opened.close();
     opened = null;
   }
   lastFrameRead = -1;
@@ -96,39 +84,24 @@ function tick() {
   if (!opened) return;
   const position = core.status.position;
   if (position === null) return;
-
-  const { handle, format } = opened;
-  const frameIdx = Math.max(0, Math.floor(position * format.fps));
+  const frameIdx = Math.max(0, Math.floor(position * opened.format.fps));
   if (frameIdx === lastFrameRead) return;
   lastFrameRead = frameIdx;
 
-  const offset = frameIdx * format.frameSize;
-  try {
-    handle.seekTo(offset);
-  } catch (e) {
-    log.warn(`DV Timecode: seek to ${offset} failed: ${e}`);
-    return;
-  }
-
-  // Only the first DIF sequence is needed; VAUX rec-date/time is duplicated
-  // across sequences within the same frame.
-  const seq = handle.read(DIF_SEQUENCE_SIZE);
-  if (!seq || seq.length < DIF_SEQUENCE_SIZE) return;
-
-  const ts = extractTimestampFromSequence(seq);
+  const frame = opened.readFrame(frameIdx);
+  if (!frame) return;
+  const ts = extractTimestamp(frame);
   showText(ts ? formatTimestamp(ts) : '');
 }
 
 function openFile(url: string) {
   closeCurrent();
 
-  if (fileExt(url) !== 'dv') {
-    log.log(`DV Timecode: ${url} is not .dv, skipping`);
-    return;
-  }
+  const ext = fileExt(url);
+  if (!isSupportedExt(ext)) return;
 
   const path = urlToPath(url);
-  log.log(`DV Timecode: opening ${path}`);
+  log.log(`DV Timecode: opening .${ext}: ${path}`);
 
   let handle: IINA.API.FileHandle;
   try {
@@ -138,24 +111,17 @@ function openFile(url: string) {
     return;
   }
 
-  const header = handle.read(4);
-  if (!header || header.length < 4) {
-    log.error('DV Timecode: file too small to be DV');
-    handle.close();
+  const source = openDvSource(handle, ext);
+  if (!source) {
+    log.log(`DV Timecode: .${ext} file does not contain DV`);
     return;
   }
+  log.log(
+    `DV Timecode: ${source.format.system.toUpperCase()}, ${source.format.fps.toFixed(3)} fps, ${source.frameCount} frames`,
+  );
 
-  const format = detectFormat(header);
-  if (!format) {
-    log.error('DV Timecode: file does not look like raw DV (header SCT/DSF mismatch)');
-    handle.close();
-    return;
-  }
-  log.log(`DV Timecode: detected ${format.system.toUpperCase()}, ${format.fps.toFixed(3)} fps, frame=${format.frameSize}B`);
-
-  opened = { handle, format };
-  // Drive updates on a timer rather than every mpv.time-pos.changed: tick() is
-  // cheap (one seek + 12 KB read), but the property fires many times/second.
+  opened = source;
+  // Poll on a timer; mpv.time-pos.changed fires too often.
   updateTimer = setInterval(tick, 200);
 }
 

@@ -6,7 +6,7 @@
     "name": "XiNGRZ",
     "email": "hi@xingrz.me"
   },
-  "description": "Overlay the recording timestamp from raw DV (.dv) tape captures.",
+  "description": "Overlay the recording timestamp from DV tape captures (.dv, .avi, .mov).",
   "entry": "dist/index.js",
   "permissions": [
     "video-overlay",
