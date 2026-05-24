@@ -2,12 +2,23 @@ import { extractHdvTimestamp, DvTimestamp } from '../dv';
 import { fileSize } from '../io';
 import { Source } from './types';
 
-// HDV (.m2t / .ts) — MPEG-2 video inside MPEG-TS. Sony HDV (HVR-Z*,
-// HDR-FX*, etc.) writes camera metadata to a dedicated private TS stream
-// identified by stream_type 0xA1 in the PMT. Each AUX PES packet carries
-// at fixed offsets (relative to a 0x63 anchor):
-//   - 0xC0 rec_date pack (year/month/day in BCD, Sony's pack ID instead of
-//     DV's 0x62, but same bit layout)
+// HDV inside MPEG-TS. Many extensions live on top of this same container:
+//   .m2t, .ts                       — standard 188-byte TS
+//   .m2ts, .mts                     — BDAV 192-byte TS (4-byte timestamp
+//                                     prefix in front of every 188-byte
+//                                     packet)
+//   .mpg, .mpeg                     — also seen in the wild as 188-byte TS
+//                                     (despite the name suggesting PS)
+// We auto-detect framing by looking for the 0x47 sync byte at two
+// consecutive 188- or 192-byte intervals near the start of the file. Some
+// captures (e.g. Premiere's Windows DV/HDV exports) have a few dozen bytes
+// of leading garbage before the first sync, which the detector also tolerates.
+//
+// Sony HDV (HVR-Z*, HDR-FX*, etc.) writes camera metadata to a dedicated
+// private TS stream identified by stream_type 0xA1 in the PMT. Each AUX
+// PES packet carries, at fixed offsets from a 0x63 anchor:
+//   - 0xC0 rec_date pack (year/month/day in BCD, Sony's ID instead of
+//     DV's 0x62 but same bit layout)
 //   - wall-clock time as BCD `SS MM HH` — note REVERSED byte order from
 //     DV's `HH MM SS` rec_time pack. Cross-verified against mediainfo's
 //     `Encoded_Date` field across multiple files.
@@ -17,13 +28,23 @@ import { Source } from './types';
 // specified. We try that as a fallback if no AUX stream is found, though
 // only date — not wall-clock — survives that path.
 
-const TS_PACKET_SIZE = 188;
 const SYNC_BYTE = 0x47;
+const TS_PACKET_SIZE = 188; // bytes per actual TS packet payload+header
 // A 1 MB window is ~0.3 s of HDV stream and contains multiple AUX packets.
 const AUX_WINDOW = 1024 * 1024;
 // 4 MB is big enough to span one MPEG-2 GOP in the fallback path.
 const VIDEO_WINDOW = 4 * 1024 * 1024;
 const CACHE_THRESHOLD_SEC = 0.5;
+
+/**
+ * TS packets can be 188-byte (standard) or 192-byte (BDAV, with a 4-byte
+ * timestamp prefix before each 188-byte payload). Either way, the sync byte
+ * 0x47 starts each TS packet, just at differing strides.
+ */
+interface Framing {
+  stride: number; // 188 or 192
+  firstSync: number; // file offset of the first sync byte
+}
 
 export function openM2t(handle: IINA.API.FileHandle): Source | null {
   const fileLen = fileSize(handle);
@@ -32,29 +53,61 @@ export function openM2t(handle: IINA.API.FileHandle): Source | null {
     return null;
   }
 
-  // Verify 188-byte TS framing.
   handle.seekTo(0);
-  const probe = handle.read(TS_PACKET_SIZE * 3);
-  if (
-    !probe || probe.length < TS_PACKET_SIZE * 3 ||
-    probe[0] !== SYNC_BYTE ||
-    probe[TS_PACKET_SIZE] !== SYNC_BYTE ||
-    probe[TS_PACKET_SIZE * 2] !== SYNC_BYTE
-  ) {
+  const probe = handle.read(2048);
+  const framing = probe ? detectFraming(probe) : null;
+  if (!framing) {
     handle.close();
     return null;
   }
 
-  const pids = findStreamPids(handle);
+  const pids = findStreamPids(handle, framing);
   if (pids.auxPid === null && pids.videoPid === null) {
     handle.close();
     return null;
   }
 
   if (pids.auxPid !== null) {
-    return makeAuxSource(handle, fileLen, pids.auxPid);
+    return makeAuxSource(handle, fileLen, framing, pids.auxPid);
   }
-  return makeVideoUserDataSource(handle, fileLen, pids.videoPid!);
+  return makeVideoUserDataSource(handle, fileLen, framing, pids.videoPid!);
+}
+
+function detectFraming(probe: Uint8Array): Framing | null {
+  // Three consecutive sync bytes at a constant stride uniquely identifies
+  // the framing. Some files have leading garbage (e.g. mid-packet truncation
+  // at the start), so we scan a couple hundred bytes for the first match.
+  const maxStart = Math.min(256, probe.length - 384);
+  for (let start = 0; start < maxStart; start++) {
+    if (probe[start] !== SYNC_BYTE) continue;
+    if (probe[start + 188] === SYNC_BYTE && probe[start + 376] === SYNC_BYTE) {
+      return { stride: 188, firstSync: start };
+    }
+    if (probe[start + 192] === SYNC_BYTE && probe[start + 384] === SYNC_BYTE) {
+      return { stride: 192, firstSync: start };
+    }
+  }
+  return null;
+}
+
+/** Snap an arbitrary file offset down to the nearest packet boundary. */
+function alignToPacket(approxOffset: number, framing: Framing): number {
+  if (approxOffset <= framing.firstSync) return framing.firstSync;
+  const relative = approxOffset - framing.firstSync;
+  return framing.firstSync + Math.floor(relative / framing.stride) * framing.stride;
+}
+
+function estimateWindowOffset(
+  positionSec: number,
+  durationSec: number,
+  fileLen: number,
+  framing: Framing,
+  windowSize: number,
+): number {
+  const est = Math.floor((positionSec / durationSec) * fileLen);
+  const maxStart = Math.max(framing.firstSync, fileLen - windowSize);
+  const clamped = Math.max(framing.firstSync, Math.min(est, maxStart));
+  return alignToPacket(clamped, framing);
 }
 
 // ---- Sony HDV: extract timestamp from AUX PES packets ----
@@ -62,6 +115,7 @@ export function openM2t(handle: IINA.API.FileHandle): Source | null {
 function makeAuxSource(
   handle: IINA.API.FileHandle,
   fileLen: number,
+  framing: Framing,
   auxPid: number,
 ): Source {
   let cachedPos = -1;
@@ -74,14 +128,12 @@ function makeAuxSource(
         return cachedTs;
       }
 
-      const aligned = estimateWindowOffset(handle, positionSec, durationSec, fileLen, AUX_WINDOW);
-      if (aligned === null) return cachedTs;
-
+      const aligned = estimateWindowOffset(positionSec, durationSec, fileLen, framing, AUX_WINDOW);
       handle.seekTo(aligned);
       const win = handle.read(Math.min(AUX_WINDOW, fileLen - aligned));
       if (!win) return cachedTs;
 
-      for (let pos = 0; pos + TS_PACKET_SIZE <= win.length; pos += TS_PACKET_SIZE) {
+      for (let pos = 0; pos + TS_PACKET_SIZE <= win.length; pos += framing.stride) {
         if (win[pos] !== SYNC_BYTE) continue;
         const b1 = win[pos + 1]!;
         const pid = ((b1 & 0x1f) << 8) | win[pos + 2]!;
@@ -105,13 +157,6 @@ function makeAuxSource(
   };
 }
 
-/**
- * AUX PES packet payload: `00 00 01 BF <length:2>` then private data.
- * Skip the 6-byte PES header and brute-scan the rest for 0xC0 (Sony HDV
- * rec_date) and 0x63 (rec_time) packs. Bit layout matches DV, so
- * `extractHdvTimestamp` would work — except its pack ID set is {0x62, 0x63}.
- * We re-implement the scan here with the HDV pack IDs.
- */
 function decodeAuxPes(payload: Uint8Array): DvTimestamp | null {
   // PES header: 00 00 01 BF length(2)
   if (
@@ -120,8 +165,7 @@ function decodeAuxPes(payload: Uint8Array): DvTimestamp | null {
   ) {
     return null;
   }
-  const body = payload.subarray(6);
-  return scanForHdvAuxPacks(body);
+  return scanForHdvAuxPacks(payload.subarray(6));
 }
 
 /**
@@ -173,6 +217,7 @@ function parseSonyHdvRecDate(body: Uint8Array, i: number): { year: number; month
 function makeVideoUserDataSource(
   handle: IINA.API.FileHandle,
   fileLen: number,
+  framing: Framing,
   videoPid: number,
 ): Source {
   let cachedPos = -1;
@@ -185,14 +230,12 @@ function makeVideoUserDataSource(
         return cachedTs;
       }
 
-      const aligned = estimateWindowOffset(handle, positionSec, durationSec, fileLen, VIDEO_WINDOW);
-      if (aligned === null) return cachedTs;
-
+      const aligned = estimateWindowOffset(positionSec, durationSec, fileLen, framing, VIDEO_WINDOW);
       handle.seekTo(aligned);
       const win = handle.read(Math.min(VIDEO_WINDOW, fileLen - aligned));
       if (!win || win.length < TS_PACKET_SIZE * 16) return cachedTs;
 
-      const es = demuxVideoEs(win, videoPid);
+      const es = demuxVideoEs(win, framing, videoPid);
       if (es.length === 0) return cachedTs;
 
       const ts = findGopUserDataAndExtract(es);
@@ -212,17 +255,17 @@ function makeVideoUserDataSource(
 
 interface StreamPids { auxPid: number | null; videoPid: number | null }
 
-function findStreamPids(handle: IINA.API.FileHandle): StreamPids {
+function findStreamPids(handle: IINA.API.FileHandle, framing: Framing): StreamPids {
   // PAT/PMT can take tens of thousands of packets to refresh in 25 Mbps HDV.
   const SCAN_BYTES = 4 * 1024 * 1024;
-  handle.seekTo(0);
+  handle.seekTo(framing.firstSync);
   const buf = handle.read(SCAN_BYTES);
   if (!buf) return { auxPid: null, videoPid: null };
 
   let pmtPid: number | null = null;
   let auxPid: number | null = null;
   let videoPid: number | null = null;
-  for (let pos = 0; pos + TS_PACKET_SIZE <= buf.length; pos += TS_PACKET_SIZE) {
+  for (let pos = 0; pos + TS_PACKET_SIZE <= buf.length; pos += framing.stride) {
     if (buf[pos] !== SYNC_BYTE) continue;
     const b1 = buf[pos + 1]!;
     const pid = ((b1 & 0x1f) << 8) | buf[pos + 2]!;
@@ -281,9 +324,8 @@ function parsePmt(buf: Uint8Array, payloadStart: number, packetEnd: number): Str
   const programInfoLength = ((buf[tableStart + 10]! & 0x0f) << 8) | buf[tableStart + 11]!;
   let p = tableStart + 12 + programInfoLength;
   const end = Math.min(tableStart + 3 + sectionLength - 4, packetEnd);
-  // Collect candidate PIDs; we prefer Sony's 0xA1 (HDV-AUX2) over 0xA0
-  // because in observed files only 0xA1 carries the rec_date pack — 0xA0 is
-  // a smaller stream with what looks like PCR-style timing data only.
+  // Prefer Sony's 0xA1 (HDV-AUX2) over 0xA0; in observed files only 0xA1
+  // carries the rec_date pack, while 0xA0 only has PCR-style timing data.
   let auxA1: number | null = null;
   let auxA0: number | null = null;
   let videoPid: number | null = null;
@@ -301,33 +343,12 @@ function parsePmt(buf: Uint8Array, payloadStart: number, packetEnd: number): Str
   return { auxPid: auxA1 ?? auxA0, videoPid };
 }
 
-function estimateWindowOffset(
-  handle: IINA.API.FileHandle,
-  positionSec: number,
-  durationSec: number,
-  fileLen: number,
-  windowSize: number,
-): number | null {
-  const est = Math.floor((positionSec / durationSec) * fileLen);
-  const clamped = Math.max(0, Math.min(est, fileLen - windowSize));
-  // Snap to a TS packet boundary so payload offsets line up.
-  handle.seekTo(clamped);
-  const probe = handle.read(TS_PACKET_SIZE * 2);
-  if (!probe || probe.length < TS_PACKET_SIZE * 2) return null;
-  for (let i = 0; i < TS_PACKET_SIZE; i++) {
-    if (probe[i] === SYNC_BYTE && probe[i + TS_PACKET_SIZE] === SYNC_BYTE) {
-      return clamped + i;
-    }
-  }
-  return null;
-}
-
 // ---- Video PES demux + GOP user_data walker (JVC/Canon fallback) ----
 
-function demuxVideoEs(tsData: Uint8Array, videoPid: number): Uint8Array {
+function demuxVideoEs(tsData: Uint8Array, framing: Framing, videoPid: number): Uint8Array {
   const out = new Uint8Array(tsData.length);
   let outLen = 0;
-  for (let pos = 0; pos + TS_PACKET_SIZE <= tsData.length; pos += TS_PACKET_SIZE) {
+  for (let pos = 0; pos + TS_PACKET_SIZE <= tsData.length; pos += framing.stride) {
     if (tsData[pos] !== SYNC_BYTE) continue;
     const b1 = tsData[pos + 1]!;
     const pid = ((b1 & 0x1f) << 8) | tsData[pos + 2]!;

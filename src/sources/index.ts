@@ -25,6 +25,10 @@ export function openSource(
       return openMov(handle);
     case 'm2t':
     case 'ts':
+    case 'mpg':
+    case 'mpeg':
+    case 'm2ts':
+    case 'mts':
       return openM2t(handle);
     default:
       try { handle.close(); } catch { /* ignore */ }
@@ -39,6 +43,10 @@ export function isSupportedExt(ext: string): boolean {
     ext === 'mov' ||
     ext === 'qt' ||
     ext === 'm2t' ||
-    ext === 'ts'
+    ext === 'ts' ||
+    ext === 'mpg' ||
+    ext === 'mpeg' ||
+    ext === 'm2ts' ||
+    ext === 'mts'
   );
 }
