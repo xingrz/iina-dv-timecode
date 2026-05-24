@@ -1,0 +1,15 @@
+{
+  "name": "DV Timecode",
+  "identifier": "me.xingrz.iina-dv-timecode",
+  "version": "0.1.0",
+  "author": {
+    "name": "XiNGRZ",
+    "email": "hi@xingrz.me"
+  },
+  "description": "Overlay the recording timestamp from raw DV (.dv) tape captures.",
+  "entry": "dist/index.js",
+  "permissions": [
+    "video-overlay",
+    "file-system"
+  ]
+}
