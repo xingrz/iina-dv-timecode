@@ -1,7 +1,7 @@
 {
   "name": "DV Timecode",
   "identifier": "me.xingrz.dvtimecode",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "XiNGRZ",
     "email": "hi@xingrz.me",
@@ -10,7 +10,7 @@
   "description": "Overlay the recording timestamp from DV/HDV tape captures (.dv, .avi, .mov, .m2t, .ts, .mpg, .mpeg, .m2ts, .mts).",
   "entry": "dist/index.js",
   "ghRepo": "xingrz/iina-dv-timecode",
-  "ghVersion": 1,
+  "ghVersion": 2,
   "permissions": [
     "video-overlay",
     "file-system"

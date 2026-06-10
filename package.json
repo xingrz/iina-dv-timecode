@@ -1,6 +1,6 @@
 {
   "name": "iina-dv-timecode",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "IINA plugin that overlays the recording timestamp from DV/HDV tape captures (.dv, .avi, .mov, .m2t, .ts, .mpg, .mpeg, .m2ts, .mts).",
   "main": "dist/index.js",
   "author": "XiNGRZ <hi@xingrz.me>",
