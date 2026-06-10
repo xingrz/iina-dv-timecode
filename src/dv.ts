@@ -20,12 +20,19 @@ export interface DvTimestamp {
   year: number;
   month: number;
   day: number;
-  // Optional because some sources (notably HDV) only expose a reliable
-  // recording date — the 0x63 pack they carry is SMPTE timecode rather than
-  // wall-clock, and showing it as time would be misleading.
+  // Optional because some sources only expose a reliable recording date.
+  // For HDV the wall-clock time comes from a field separate from the tape
+  // timecode (see tc* below); for DV both ride in the one rec_time pack.
   hour?: number;
   minute?: number;
   second?: number;
+  // Frame-accurate tape SMPTE timecode (rec-run) decoded from Sony HDV's
+  // 0x63 pack — independent of the wall-clock above and only present when a
+  // valid code was found. See docs/hdv-metadata-findings.md.
+  tcHour?: number;
+  tcMinute?: number;
+  tcSecond?: number;
+  tcFrame?: number;
 }
 
 // VAUX pack headers we care about. The audio side (0x52/0x53) carries the same

@@ -172,7 +172,8 @@ function decodeAuxPes(payload: Uint8Array): DvTimestamp | null {
  * Sony HDV-AUX (TSHV) PES payload carries, at fixed relative offsets from a
  * 0x63 SMPTE-timecode pack header:
  *
- *   +0..4    0x63 + 4 bytes SMPTE timecode (rec-run, ignored — not wall-clock)
+ *   +0..4    0x63 + 4 bytes tape SMPTE timecode (rec-run, HH FF SS MM) —
+ *            frame-accurate, decoded into tc*; independent of the wall-clock
  *   +5..9    0xC0 + 4 bytes BCD rec_date (tz, day, month, year)
  *   +10      0xFF separator
  *   +11..13  BCD wall-clock SS MM HH (reversed from DV's HH MM SS order)
@@ -189,13 +190,33 @@ function scanForHdvAuxPacks(body: Uint8Array): DvTimestamp | null {
     if (body[i + 10] !== 0xff) continue;
     const date = parseSonyHdvRecDate(body, i + 5);
     if (!date) continue;
+    // Frame-accurate tape timecode lives in the 0x63 pack itself; it's rec-run
+    // and independent of the wall-clock, so decode it separately and let either
+    // be absent without dropping the other.
+    const tc = parseSonyHdvTimecode(body, i);
     const second = bcd(body[i + 11]! & 0x7f);
     const minute = bcd(body[i + 12]! & 0x7f);
     const hour = bcd(body[i + 13]! & 0x3f);
-    if (second > 59 || minute > 59 || hour > 23) return date;
-    return { ...date, hour, minute, second };
+    const clock = second > 59 || minute > 59 || hour > 23 ? null : { hour, minute, second };
+    if (!clock && !tc) return date;
+    return { ...date, ...clock, ...tc };
   }
   return null;
+}
+
+function parseSonyHdvTimecode(
+  body: Uint8Array,
+  i: number,
+): { tcHour: number; tcMinute: number; tcSecond: number; tcFrame: number } | null {
+  // The 0x63 pack's four data bytes are the tape SMPTE timecode, byte order
+  // HH FF SS MM (flag bits masked off).
+  const tcHour = bcd(body[i + 1]! & 0x3f);
+  const tcFrame = bcd(body[i + 2]! & 0x3f);
+  const tcSecond = bcd(body[i + 3]! & 0x7f);
+  const tcMinute = bcd(body[i + 4]! & 0x7f);
+  // 29 covers NTSC's 30-frame wrap; PAL wraps at 25. Reject anything past it.
+  if (tcHour > 23 || tcMinute > 59 || tcSecond > 59 || tcFrame > 29) return null;
+  return { tcHour, tcMinute, tcSecond, tcFrame };
 }
 
 function bcd(b: number): number {

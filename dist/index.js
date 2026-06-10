@@ -540,7 +540,8 @@ function decodeAuxPes(payload) {
 * Sony HDV-AUX (TSHV) PES payload carries, at fixed relative offsets from a
 * 0x63 SMPTE-timecode pack header:
 *
-*   +0..4    0x63 + 4 bytes SMPTE timecode (rec-run, ignored — not wall-clock)
+*   +0..4    0x63 + 4 bytes tape SMPTE timecode (rec-run, HH FF SS MM) —
+*            frame-accurate, decoded into tc*; independent of the wall-clock
 *   +5..9    0xC0 + 4 bytes BCD rec_date (tz, day, month, year)
 *   +10      0xFF separator
 *   +11..13  BCD wall-clock SS MM HH (reversed from DV's HH MM SS order)
@@ -557,17 +558,32 @@ function scanForHdvAuxPacks(body) {
 		if (body[i + 10] !== 255) continue;
 		const date = parseSonyHdvRecDate(body, i + 5);
 		if (!date) continue;
+		const tc = parseSonyHdvTimecode(body, i);
 		const second = bcd(body[i + 11] & 127);
 		const minute = bcd(body[i + 12] & 127);
 		const hour = bcd(body[i + 13] & 63);
-		if (second > 59 || minute > 59 || hour > 23) return date;
-		return _objectSpread2(_objectSpread2({}, date), {}, {
+		const clock = second > 59 || minute > 59 || hour > 23 ? null : {
 			hour,
 			minute,
 			second
-		});
+		};
+		if (!clock && !tc) return date;
+		return _objectSpread2(_objectSpread2(_objectSpread2({}, date), clock), tc);
 	}
 	return null;
+}
+function parseSonyHdvTimecode(body, i) {
+	const tcHour = bcd(body[i + 1] & 63);
+	const tcFrame = bcd(body[i + 2] & 63);
+	const tcSecond = bcd(body[i + 3] & 127);
+	const tcMinute = bcd(body[i + 4] & 127);
+	if (tcHour > 23 || tcMinute > 59 || tcSecond > 59 || tcFrame > 29) return null;
+	return {
+		tcHour,
+		tcMinute,
+		tcSecond,
+		tcFrame
+	};
 }
 function bcd(b) {
 	return (b & 15) + (b >>> 4 & 15) * 10;
@@ -1060,6 +1076,7 @@ const STYLE = `
     background: rgba(0, 0, 0, 0.50);
     backdrop-filter: blur(10px);
     color: #fff;
+    text-align: right;
     font: 16px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
     border-radius: 4px;
     pointer-events: none;
@@ -1083,10 +1100,11 @@ function pad2(n) {
 	return n < 10 ? "0" + n : String(n);
 }
 function formatTimestamp(ts) {
-	var _ts$minute, _ts$second;
+	var _ts$minute, _ts$second, _ts$tcMinute, _ts$tcSecond, _ts$tcFrame;
 	const date = `${ts.year}-${pad2(ts.month)}-${pad2(ts.day)}`;
-	if (ts.hour === void 0) return date;
-	return `${date} ${pad2(ts.hour)}:${pad2((_ts$minute = ts.minute) !== null && _ts$minute !== void 0 ? _ts$minute : 0)}:${pad2((_ts$second = ts.second) !== null && _ts$second !== void 0 ? _ts$second : 0)}`;
+	const clock = ts.hour === void 0 ? date : `${date} ${pad2(ts.hour)}:${pad2((_ts$minute = ts.minute) !== null && _ts$minute !== void 0 ? _ts$minute : 0)}:${pad2((_ts$second = ts.second) !== null && _ts$second !== void 0 ? _ts$second : 0)}`;
+	if (ts.tcHour === void 0) return clock;
+	return `${`TC ${pad2(ts.tcHour)}:${pad2((_ts$tcMinute = ts.tcMinute) !== null && _ts$tcMinute !== void 0 ? _ts$tcMinute : 0)}:${pad2((_ts$tcSecond = ts.tcSecond) !== null && _ts$tcSecond !== void 0 ? _ts$tcSecond : 0)}:${pad2((_ts$tcFrame = ts.tcFrame) !== null && _ts$tcFrame !== void 0 ? _ts$tcFrame : 0)}`}<br>${clock}`;
 }
 function ensureOverlayReady() {
 	if (overlayInitialized) return true;

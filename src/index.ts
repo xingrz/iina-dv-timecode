@@ -17,6 +17,7 @@ const STYLE = `
     background: rgba(0, 0, 0, 0.50);
     backdrop-filter: blur(10px);
     color: #fff;
+    text-align: right;
     font: 16px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
     border-radius: 4px;
     pointer-events: none;
@@ -45,8 +46,15 @@ function pad2(n: number): string {
 
 function formatTimestamp(ts: DvTimestamp): string {
   const date = `${ts.year}-${pad2(ts.month)}-${pad2(ts.day)}`;
-  if (ts.hour === undefined) return date;
-  return `${date} ${pad2(ts.hour)}:${pad2(ts.minute ?? 0)}:${pad2(ts.second ?? 0)}`;
+  const clock =
+    ts.hour === undefined
+      ? date
+      : `${date} ${pad2(ts.hour)}:${pad2(ts.minute ?? 0)}:${pad2(ts.second ?? 0)}`;
+  if (ts.tcHour === undefined) return clock;
+  // Frame-accurate tape timecode on its own line above the wall-clock; the
+  // .ts box is right-aligned so both lines hug the right edge.
+  const tc = `TC ${pad2(ts.tcHour)}:${pad2(ts.tcMinute ?? 0)}:${pad2(ts.tcSecond ?? 0)}:${pad2(ts.tcFrame ?? 0)}`;
+  return `${tc}<br>${clock}`;
 }
 
 function ensureOverlayReady(): boolean {
