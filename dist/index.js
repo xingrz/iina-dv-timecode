@@ -507,6 +507,7 @@ function makeAuxSource(handle, fileLen, framing, auxPid, fps) {
 	let cachedTs = null;
 	let anchorFrames = -1;
 	let anchorPos = 0;
+	let dataPresent = false;
 	function decode(positionSec, durationSec) {
 		const aligned = estimateWindowOffset(positionSec, durationSec, fileLen, framing, AUX_WINDOW);
 		handle.seekTo(aligned);
@@ -526,17 +527,18 @@ function makeAuxSource(handle, fileLen, framing, auxPid, fps) {
 	}
 	const source = {
 		timestampAt(positionSec, durationSec) {
-			if (!durationSec || durationSec <= 0) return cachedTs;
-			if (!cachedTs || Math.abs(positionSec - cachedPos) >= CACHE_THRESHOLD_SEC) {
+			if (!durationSec || durationSec <= 0) return dataPresent ? cachedTs : null;
+			if (cachedPos < 0 || Math.abs(positionSec - cachedPos) >= CACHE_THRESHOLD_SEC) {
+				cachedPos = positionSec;
 				const ts = decode(positionSec, durationSec);
+				dataPresent = ts !== null;
 				if (ts) {
 					cachedTs = ts;
-					cachedPos = positionSec;
 					anchorPos = positionSec;
 					anchorFrames = fps && ts.tcHour !== void 0 ? tcToFrames(ts, wrap) : -1;
 				}
 			}
-			if (!cachedTs) return null;
+			if (!dataPresent || !cachedTs) return null;
 			if (fps && anchorFrames >= 0) {
 				const total = Math.max(0, anchorFrames + Math.round((positionSec - anchorPos) * fps));
 				return _objectSpread2(_objectSpread2({}, cachedTs), framesToTc(total, wrap));
@@ -1130,6 +1132,9 @@ let opened = null;
 let updateTimer = null;
 let overlayInitialized = false;
 let lastText = "";
+let seenTc = false;
+let seenWall = false;
+let seenDate = false;
 const STYLE = `
   .ts {
     position: absolute;
@@ -1162,12 +1167,38 @@ function urlToPath(url) {
 function pad2(n) {
 	return n < 10 ? "0" + n : String(n);
 }
-function formatTimestamp(ts) {
-	var _ts$minute, _ts$second, _ts$tcMinute, _ts$tcSecond, _ts$tcFrame;
-	const date = `${ts.year}-${pad2(ts.month)}-${pad2(ts.day)}`;
-	const clock = ts.hour === void 0 ? date : `${date} ${pad2(ts.hour)}:${pad2((_ts$minute = ts.minute) !== null && _ts$minute !== void 0 ? _ts$minute : 0)}:${pad2((_ts$second = ts.second) !== null && _ts$second !== void 0 ? _ts$second : 0)}`;
-	if (ts.tcHour === void 0) return clock;
-	return `${`TC ${pad2(ts.tcHour)}:${pad2((_ts$tcMinute = ts.tcMinute) !== null && _ts$tcMinute !== void 0 ? _ts$tcMinute : 0)}:${pad2((_ts$tcSecond = ts.tcSecond) !== null && _ts$tcSecond !== void 0 ? _ts$tcSecond : 0)}:${pad2((_ts$tcFrame = ts.tcFrame) !== null && _ts$tcFrame !== void 0 ? _ts$tcFrame : 0)}`}<br>${clock}`;
+const DASH_DATE = "----.--.--";
+function tcLine(ts) {
+	if (ts && ts.tcHour !== void 0) {
+		var _ts$tcMinute, _ts$tcSecond, _ts$tcFrame;
+		return `TC ${pad2(ts.tcHour)}:${pad2((_ts$tcMinute = ts.tcMinute) !== null && _ts$tcMinute !== void 0 ? _ts$tcMinute : 0)}:${pad2((_ts$tcSecond = ts.tcSecond) !== null && _ts$tcSecond !== void 0 ? _ts$tcSecond : 0)}:${pad2((_ts$tcFrame = ts.tcFrame) !== null && _ts$tcFrame !== void 0 ? _ts$tcFrame : 0)}`;
+	}
+	return seenTc ? "TC --:--:--:--" : null;
+}
+function dateTimeLine(ts) {
+	if (ts) {
+		const date = `${ts.year}.${pad2(ts.month)}.${pad2(ts.day)}`;
+		if (ts.hour !== void 0) {
+			var _ts$minute, _ts$second;
+			return `${date} ${pad2(ts.hour)}:${pad2((_ts$minute = ts.minute) !== null && _ts$minute !== void 0 ? _ts$minute : 0)}:${pad2((_ts$second = ts.second) !== null && _ts$second !== void 0 ? _ts$second : 0)}`;
+		}
+		return seenWall ? `${date} --:--:--` : date;
+	}
+	if (!seenDate) return null;
+	return seenWall ? `${DASH_DATE} --:--:--` : DASH_DATE;
+}
+function render(ts) {
+	if (ts) {
+		seenDate = true;
+		if (ts.hour !== void 0) seenWall = true;
+		if (ts.tcHour !== void 0) seenTc = true;
+	}
+	const lines = [];
+	const tc = tcLine(ts);
+	if (tc !== null) lines.push(tc);
+	const dt = dateTimeLine(ts);
+	if (dt !== null) lines.push(dt);
+	return lines.join("<br>");
 }
 function ensureOverlayReady() {
 	if (overlayInitialized) return true;
@@ -1194,6 +1225,7 @@ function closeCurrent() {
 		opened.close();
 		opened = null;
 	}
+	seenTc = seenWall = seenDate = false;
 	showText("");
 }
 function tick() {
@@ -1201,8 +1233,7 @@ function tick() {
 	const position = core.status.position;
 	if (position === null) return;
 	const duration = core.status.duration;
-	const ts = opened.timestampAt(position, duration !== null && duration !== void 0 ? duration : void 0);
-	showText(ts ? formatTimestamp(ts) : "");
+	showText(render(opened.timestampAt(position, duration !== null && duration !== void 0 ? duration : void 0)));
 }
 function openFile(url) {
 	var _source$updateInterva;

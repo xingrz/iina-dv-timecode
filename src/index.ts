@@ -7,6 +7,13 @@ let opened: Source | null = null;
 let updateTimer: string | null = null;
 let overlayInitialized = false;
 let lastText = '';
+// Which fields the current file has ever provided. Lets a mid-stream dropout
+// mask exactly what was lost: a file that never had a tape TC won't sprout a
+// dashed TC line, while a full dropout dashes every line the file normally
+// shows. Reset per file in closeCurrent().
+let seenTc = false;
+let seenWall = false;
+let seenDate = false;
 
 const STYLE = `
   .ts {
@@ -44,17 +51,49 @@ function pad2(n: number): string {
   return n < 10 ? '0' + n : String(n);
 }
 
-function formatTimestamp(ts: DvTimestamp): string {
-  const date = `${ts.year}-${pad2(ts.month)}-${pad2(ts.day)}`;
-  const clock =
-    ts.hour === undefined
-      ? date
-      : `${date} ${pad2(ts.hour)}:${pad2(ts.minute ?? 0)}:${pad2(ts.second ?? 0)}`;
-  if (ts.tcHour === undefined) return clock;
-  // Frame-accurate tape timecode on its own line above the wall-clock; the
-  // .ts box is right-aligned so both lines hug the right edge.
-  const tc = `TC ${pad2(ts.tcHour)}:${pad2(ts.tcMinute ?? 0)}:${pad2(ts.tcSecond ?? 0)}:${pad2(ts.tcFrame ?? 0)}`;
-  return `${tc}<br>${clock}`;
+// Masked date standing in for `YYYY.MM.DD`. The `.` separators (not `-`) keep
+// it legible as a date even when every digit is a dash.
+const DASH_DATE = '----.--.--';
+
+// The tape-TC line: real value when present; a dashed placeholder once the file
+// has shown a TC but the current position has none; otherwise omitted.
+function tcLine(ts: DvTimestamp | null): string | null {
+  if (ts && ts.tcHour !== undefined) {
+    return `TC ${pad2(ts.tcHour)}:${pad2(ts.tcMinute ?? 0)}:${pad2(ts.tcSecond ?? 0)}:${pad2(ts.tcFrame ?? 0)}`;
+  }
+  return seenTc ? 'TC --:--:--:--' : null;
+}
+
+// The date + wall-clock line. With data we show what we have (date always, time
+// when present); on a dropout we dash the parts the file normally shows.
+function dateTimeLine(ts: DvTimestamp | null): string | null {
+  if (ts) {
+    const date = `${ts.year}.${pad2(ts.month)}.${pad2(ts.day)}`;
+    if (ts.hour !== undefined) {
+      return `${date} ${pad2(ts.hour)}:${pad2(ts.minute ?? 0)}:${pad2(ts.second ?? 0)}`;
+    }
+    return seenWall ? `${date} --:--:--` : date;
+  }
+  if (!seenDate) return null;
+  return seenWall ? `${DASH_DATE} --:--:--` : DASH_DATE;
+}
+
+// Build the overlay HTML. `ts` is null when the current position has no data;
+// the seen* flags then choose between a "data lost" placeholder and nothing.
+// The tape TC sits on its own line above the date/wall-clock; the .ts box is
+// right-aligned so both lines hug the right edge.
+function render(ts: DvTimestamp | null): string {
+  if (ts) {
+    seenDate = true;
+    if (ts.hour !== undefined) seenWall = true;
+    if (ts.tcHour !== undefined) seenTc = true;
+  }
+  const lines: string[] = [];
+  const tc = tcLine(ts);
+  if (tc !== null) lines.push(tc);
+  const dt = dateTimeLine(ts);
+  if (dt !== null) lines.push(dt);
+  return lines.join('<br>');
 }
 
 function ensureOverlayReady(): boolean {
@@ -85,6 +124,7 @@ function closeCurrent() {
     opened.close();
     opened = null;
   }
+  seenTc = seenWall = seenDate = false;
   showText('');
 }
 
@@ -94,7 +134,7 @@ function tick() {
   if (position === null) return;
   const duration = core.status.duration;
   const ts = opened.timestampAt(position, duration ?? undefined);
-  showText(ts ? formatTimestamp(ts) : '');
+  showText(render(ts));
 }
 
 function openFile(url: string) {

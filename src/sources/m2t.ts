@@ -132,6 +132,10 @@ function makeAuxSource(
   // total frame count, plus the playback position it was read at. -1 = none.
   let anchorFrames = -1;
   let anchorPos = 0;
+  // Whether the most recent re-anchor read found AUX data. False across a
+  // dropout (e.g. tape-end garbage) so we report null instead of free-running
+  // a fabricated timecode off a stale anchor.
+  let dataPresent = false;
 
   function decode(positionSec: number, durationSec: number): DvTimestamp | null {
     const aligned = estimateWindowOffset(positionSec, durationSec, fileLen, framing, AUX_WINDOW);
@@ -156,24 +160,28 @@ function makeAuxSource(
 
   const source: Source = {
     timestampAt(positionSec, durationSec) {
-      if (!durationSec || durationSec <= 0) return cachedTs;
+      if (!durationSec || durationSec <= 0) return dataPresent ? cachedTs : null;
 
       // Hit the disk only every CACHE_THRESHOLD_SEC of playback; that read
-      // re-anchors both the wall-clock and the interpolation baseline.
-      if (!cachedTs || Math.abs(positionSec - cachedPos) >= CACHE_THRESHOLD_SEC) {
+      // re-anchors the wall-clock and the interpolation baseline. Advance
+      // cachedPos even when nothing is found (a tape-end dropout) so we don't
+      // re-scan every tick, and track dataPresent so the overlay can show a
+      // "data lost" placeholder instead of a frozen or fabricated value.
+      if (cachedPos < 0 || Math.abs(positionSec - cachedPos) >= CACHE_THRESHOLD_SEC) {
+        cachedPos = positionSec;
         const ts = decode(positionSec, durationSec);
+        dataPresent = ts !== null;
         if (ts) {
           cachedTs = ts;
-          cachedPos = positionSec;
           anchorPos = positionSec;
           anchorFrames = fps && ts.tcHour !== undefined ? tcToFrames(ts, wrap) : -1;
         }
       }
-      if (!cachedTs) return null;
+      if (!dataPresent || !cachedTs) return null;
 
       // Between reads, advance the tape TC from the anchor using the player
-      // clock. rec-run discontinuities self-correct on the next read; within a
-      // take the TC tracks playback exactly, so this stays frame-accurate.
+      // clock. Within a take the TC tracks playback exactly, so this stays
+      // frame-accurate; the next read re-anchors across any discontinuity.
       if (fps && anchorFrames >= 0) {
         const total = Math.max(0, anchorFrames + Math.round((positionSec - anchorPos) * fps));
         return { ...cachedTs, ...framesToTc(total, wrap) };
