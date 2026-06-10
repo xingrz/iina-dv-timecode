@@ -121,8 +121,10 @@ function openFile(url: string) {
   }
 
   opened = source;
-  // Poll on a timer; mpv.time-pos.changed fires too often.
-  updateTimer = setInterval(tick, 200);
+  // Poll on a timer; mpv.time-pos.changed fires too often. HDV asks for a
+  // frame-cadence interval so its interpolated tape TC advances smoothly;
+  // other sources take the default.
+  updateTimer = setInterval(tick, source.updateIntervalMs ?? 200);
 }
 
 event.on('iina.file-loaded', (url: string) => {

@@ -15,5 +15,12 @@ export interface Source {
    * @returns The recording timestamp, or null if it could not be extracted.
    */
   timestampAt(positionSec: number, durationSec?: number): DvTimestamp | null;
+  /**
+   * Optional preferred polling interval in ms. HDV interpolates a
+   * frame-accurate tape timecode between disk reads, so it asks for a
+   * frame-cadence poll (~40 ms) to advance one frame at a time; other
+   * sources omit it and take the default.
+   */
+  updateIntervalMs?: number;
   close(): void;
 }

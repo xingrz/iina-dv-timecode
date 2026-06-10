@@ -68,7 +68,10 @@ export function openM2t(handle: IINA.API.FileHandle): Source | null {
   }
 
   if (pids.auxPid !== null) {
-    return makeAuxSource(handle, fileLen, framing, pids.auxPid);
+    const fps = pids.videoPid !== null
+      ? detectHdvFps(handle, fileLen, framing, pids.videoPid)
+      : null;
+    return makeAuxSource(handle, fileLen, framing, pids.auxPid, fps);
   }
   return makeVideoUserDataSource(handle, fileLen, framing, pids.videoPid!);
 }
@@ -117,37 +120,63 @@ function makeAuxSource(
   fileLen: number,
   framing: Framing,
   auxPid: number,
+  fps: number | null,
 ): Source {
+  // PAL HDV runs 25 fps (frame field 0-24), NTSC ~29.97 (0-29). `wrap` is the
+  // frame modulus; `fps` (the real rate) drives interpolation between reads.
+  const wrap = fps ? Math.round(fps) : 0;
+
   let cachedPos = -1;
   let cachedTs: DvTimestamp | null = null;
+  // Anchor for per-frame interpolation: the decoded tape TC expressed as a
+  // total frame count, plus the playback position it was read at. -1 = none.
+  let anchorFrames = -1;
+  let anchorPos = 0;
 
-  return {
+  function decode(positionSec: number, durationSec: number): DvTimestamp | null {
+    const aligned = estimateWindowOffset(positionSec, durationSec, fileLen, framing, AUX_WINDOW);
+    handle.seekTo(aligned);
+    const win = handle.read(Math.min(AUX_WINDOW, fileLen - aligned));
+    if (!win) return null;
+
+    for (let pos = 0; pos + TS_PACKET_SIZE <= win.length; pos += framing.stride) {
+      if (win[pos] !== SYNC_BYTE) continue;
+      const b1 = win[pos + 1]!;
+      const pid = ((b1 & 0x1f) << 8) | win[pos + 2]!;
+      if (pid !== auxPid) continue;
+      if (((b1 >> 6) & 1) === 0) continue;
+      const payloadStart = tsPayloadStart(win, pos);
+      if (payloadStart === null) continue;
+      const payload = win.subarray(payloadStart, pos + TS_PACKET_SIZE);
+      const ts = decodeAuxPes(payload);
+      if (ts) return ts;
+    }
+    return null;
+  }
+
+  const source: Source = {
     timestampAt(positionSec, durationSec) {
       if (!durationSec || durationSec <= 0) return cachedTs;
-      if (cachedTs && Math.abs(positionSec - cachedPos) < CACHE_THRESHOLD_SEC) {
-        return cachedTs;
-      }
 
-      const aligned = estimateWindowOffset(positionSec, durationSec, fileLen, framing, AUX_WINDOW);
-      handle.seekTo(aligned);
-      const win = handle.read(Math.min(AUX_WINDOW, fileLen - aligned));
-      if (!win) return cachedTs;
-
-      for (let pos = 0; pos + TS_PACKET_SIZE <= win.length; pos += framing.stride) {
-        if (win[pos] !== SYNC_BYTE) continue;
-        const b1 = win[pos + 1]!;
-        const pid = ((b1 & 0x1f) << 8) | win[pos + 2]!;
-        if (pid !== auxPid) continue;
-        if (((b1 >> 6) & 1) === 0) continue;
-        const payloadStart = tsPayloadStart(win, pos);
-        if (payloadStart === null) continue;
-        const payload = win.subarray(payloadStart, pos + TS_PACKET_SIZE);
-        const ts = decodeAuxPes(payload);
+      // Hit the disk only every CACHE_THRESHOLD_SEC of playback; that read
+      // re-anchors both the wall-clock and the interpolation baseline.
+      if (!cachedTs || Math.abs(positionSec - cachedPos) >= CACHE_THRESHOLD_SEC) {
+        const ts = decode(positionSec, durationSec);
         if (ts) {
-          cachedPos = positionSec;
           cachedTs = ts;
-          return ts;
+          cachedPos = positionSec;
+          anchorPos = positionSec;
+          anchorFrames = fps && ts.tcHour !== undefined ? tcToFrames(ts, wrap) : -1;
         }
+      }
+      if (!cachedTs) return null;
+
+      // Between reads, advance the tape TC from the anchor using the player
+      // clock. rec-run discontinuities self-correct on the next read; within a
+      // take the TC tracks playback exactly, so this stays frame-accurate.
+      if (fps && anchorFrames >= 0) {
+        const total = Math.max(0, anchorFrames + Math.round((positionSec - anchorPos) * fps));
+        return { ...cachedTs, ...framesToTc(total, wrap) };
       }
       return cachedTs;
     },
@@ -155,6 +184,66 @@ function makeAuxSource(
       try { handle.close(); } catch { /* ignore */ }
     },
   };
+  // With a known frame rate, refresh at frame cadence so the interpolated tape
+  // TC advances one frame at a time; otherwise the default poll rate is plenty
+  // for the second-resolution wall-clock.
+  if (fps) source.updateIntervalMs = Math.round(1000 / fps);
+  return source;
+}
+
+/**
+ * Read the MPEG-2 sequence header's frame_rate_code from the video ES so the
+ * AUX source can interpolate the tape timecode at the right cadence (25 fps
+ * PAL / 29.97 NTSC). Returns null if no sequence header turns up in the first
+ * window, in which case the source falls back to coarse per-read TC.
+ */
+function detectHdvFps(
+  handle: IINA.API.FileHandle,
+  fileLen: number,
+  framing: Framing,
+  videoPid: number,
+): number | null {
+  handle.seekTo(framing.firstSync);
+  const win = handle.read(Math.min(VIDEO_WINDOW, fileLen - framing.firstSync));
+  if (!win) return null;
+  const es = demuxVideoEs(win, framing, videoPid);
+  for (let i = 0; i + 8 <= es.length; i++) {
+    // sequence_header_code 00 00 01 B3, then 12b width + 12b height + 4b aspect
+    // + 4b frame_rate_code — the rate nibble lands in the low bits of byte 7.
+    if (es[i] === 0 && es[i + 1] === 0 && es[i + 2] === 1 && es[i + 3] === 0xb3) {
+      return MPEG2_FRAME_RATES[es[i + 7]! & 0x0f] ?? null;
+    }
+  }
+  return null;
+}
+
+// MPEG-2 frame_rate_code table (ISO/IEC 13818-2, Table 6-4).
+const MPEG2_FRAME_RATES: Record<number, number> = {
+  1: 24000 / 1001,
+  2: 24,
+  3: 25,
+  4: 30000 / 1001,
+  5: 30,
+  6: 50,
+  7: 60000 / 1001,
+  8: 60,
+};
+
+function tcToFrames(ts: DvTimestamp, wrap: number): number {
+  return ((ts.tcHour! * 60 + ts.tcMinute!) * 60 + ts.tcSecond!) * wrap + ts.tcFrame!;
+}
+
+function framesToTc(
+  total: number,
+  wrap: number,
+): { tcHour: number; tcMinute: number; tcSecond: number; tcFrame: number } {
+  const tcFrame = total % wrap;
+  const totalSeconds = Math.floor(total / wrap);
+  const tcSecond = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const tcMinute = totalMinutes % 60;
+  const tcHour = Math.floor(totalMinutes / 60) % 24;
+  return { tcHour, tcMinute, tcSecond, tcFrame };
 }
 
 function decodeAuxPes(payload: Uint8Array): DvTimestamp | null {

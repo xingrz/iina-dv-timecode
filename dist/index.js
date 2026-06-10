@@ -469,7 +469,10 @@ function openM2t(handle) {
 		handle.close();
 		return null;
 	}
-	if (pids.auxPid !== null) return makeAuxSource(handle, fileLen, framing, pids.auxPid);
+	if (pids.auxPid !== null) {
+		const fps = pids.videoPid !== null ? detectHdvFps(handle, fileLen, framing, pids.videoPid) : null;
+		return makeAuxSource(handle, fileLen, framing, pids.auxPid, fps);
+	}
 	return makeVideoUserDataSource(handle, fileLen, framing, pids.videoPid);
 }
 function detectFraming(probe) {
@@ -498,30 +501,45 @@ function estimateWindowOffset(positionSec, durationSec, fileLen, framing, window
 	const maxStart = Math.max(framing.firstSync, fileLen - windowSize);
 	return alignToPacket(Math.max(framing.firstSync, Math.min(est, maxStart)), framing);
 }
-function makeAuxSource(handle, fileLen, framing, auxPid) {
+function makeAuxSource(handle, fileLen, framing, auxPid, fps) {
+	const wrap = fps ? Math.round(fps) : 0;
 	let cachedPos = -1;
 	let cachedTs = null;
-	return {
+	let anchorFrames = -1;
+	let anchorPos = 0;
+	function decode(positionSec, durationSec) {
+		const aligned = estimateWindowOffset(positionSec, durationSec, fileLen, framing, AUX_WINDOW);
+		handle.seekTo(aligned);
+		const win = handle.read(Math.min(AUX_WINDOW, fileLen - aligned));
+		if (!win) return null;
+		for (let pos = 0; pos + TS_PACKET_SIZE <= win.length; pos += framing.stride) {
+			if (win[pos] !== SYNC_BYTE) continue;
+			const b1 = win[pos + 1];
+			if (((b1 & 31) << 8 | win[pos + 2]) !== auxPid) continue;
+			if ((b1 >> 6 & 1) === 0) continue;
+			const payloadStart = tsPayloadStart(win, pos);
+			if (payloadStart === null) continue;
+			const ts = decodeAuxPes(win.subarray(payloadStart, pos + TS_PACKET_SIZE));
+			if (ts) return ts;
+		}
+		return null;
+	}
+	const source = {
 		timestampAt(positionSec, durationSec) {
 			if (!durationSec || durationSec <= 0) return cachedTs;
-			if (cachedTs && Math.abs(positionSec - cachedPos) < CACHE_THRESHOLD_SEC) return cachedTs;
-			const aligned = estimateWindowOffset(positionSec, durationSec, fileLen, framing, AUX_WINDOW);
-			handle.seekTo(aligned);
-			const win = handle.read(Math.min(AUX_WINDOW, fileLen - aligned));
-			if (!win) return cachedTs;
-			for (let pos = 0; pos + TS_PACKET_SIZE <= win.length; pos += framing.stride) {
-				if (win[pos] !== SYNC_BYTE) continue;
-				const b1 = win[pos + 1];
-				if (((b1 & 31) << 8 | win[pos + 2]) !== auxPid) continue;
-				if ((b1 >> 6 & 1) === 0) continue;
-				const payloadStart = tsPayloadStart(win, pos);
-				if (payloadStart === null) continue;
-				const ts = decodeAuxPes(win.subarray(payloadStart, pos + TS_PACKET_SIZE));
+			if (!cachedTs || Math.abs(positionSec - cachedPos) >= CACHE_THRESHOLD_SEC) {
+				const ts = decode(positionSec, durationSec);
 				if (ts) {
-					cachedPos = positionSec;
 					cachedTs = ts;
-					return ts;
+					cachedPos = positionSec;
+					anchorPos = positionSec;
+					anchorFrames = fps && ts.tcHour !== void 0 ? tcToFrames(ts, wrap) : -1;
 				}
+			}
+			if (!cachedTs) return null;
+			if (fps && anchorFrames >= 0) {
+				const total = Math.max(0, anchorFrames + Math.round((positionSec - anchorPos) * fps));
+				return _objectSpread2(_objectSpread2({}, cachedTs), framesToTc(total, wrap));
 			}
 			return cachedTs;
 		},
@@ -530,6 +548,51 @@ function makeAuxSource(handle, fileLen, framing, auxPid) {
 				handle.close();
 			} catch (_unused) {}
 		}
+	};
+	if (fps) source.updateIntervalMs = Math.round(1e3 / fps);
+	return source;
+}
+/**
+* Read the MPEG-2 sequence header's frame_rate_code from the video ES so the
+* AUX source can interpolate the tape timecode at the right cadence (25 fps
+* PAL / 29.97 NTSC). Returns null if no sequence header turns up in the first
+* window, in which case the source falls back to coarse per-read TC.
+*/
+function detectHdvFps(handle, fileLen, framing, videoPid) {
+	handle.seekTo(framing.firstSync);
+	const win = handle.read(Math.min(VIDEO_WINDOW, fileLen - framing.firstSync));
+	if (!win) return null;
+	const es = demuxVideoEs(win, framing, videoPid);
+	for (let i = 0; i + 8 <= es.length; i++) if (es[i] === 0 && es[i + 1] === 0 && es[i + 2] === 1 && es[i + 3] === 179) {
+		var _MPEG2_FRAME_RATES;
+		return (_MPEG2_FRAME_RATES = MPEG2_FRAME_RATES[es[i + 7] & 15]) !== null && _MPEG2_FRAME_RATES !== void 0 ? _MPEG2_FRAME_RATES : null;
+	}
+	return null;
+}
+const MPEG2_FRAME_RATES = {
+	1: 24e3 / 1001,
+	2: 24,
+	3: 25,
+	4: 3e4 / 1001,
+	5: 30,
+	6: 50,
+	7: 6e4 / 1001,
+	8: 60
+};
+function tcToFrames(ts, wrap) {
+	return ((ts.tcHour * 60 + ts.tcMinute) * 60 + ts.tcSecond) * wrap + ts.tcFrame;
+}
+function framesToTc(total, wrap) {
+	const tcFrame = total % wrap;
+	const totalSeconds = Math.floor(total / wrap);
+	const tcSecond = totalSeconds % 60;
+	const totalMinutes = Math.floor(totalSeconds / 60);
+	const tcMinute = totalMinutes % 60;
+	return {
+		tcHour: Math.floor(totalMinutes / 60) % 24,
+		tcMinute,
+		tcSecond,
+		tcFrame
 	};
 }
 function decodeAuxPes(payload) {
@@ -1142,6 +1205,7 @@ function tick() {
 	showText(ts ? formatTimestamp(ts) : "");
 }
 function openFile(url) {
+	var _source$updateInterva;
 	closeCurrent();
 	const ext = fileExt(url);
 	if (!isSupportedExt(ext)) return;
@@ -1160,7 +1224,7 @@ function openFile(url) {
 		return;
 	}
 	opened = source;
-	updateTimer = setInterval(tick, 200);
+	updateTimer = setInterval(tick, (_source$updateInterva = source.updateIntervalMs) !== null && _source$updateInterva !== void 0 ? _source$updateInterva : 200);
 }
 event.on("iina.file-loaded", (url) => {
 	openFile(url);
